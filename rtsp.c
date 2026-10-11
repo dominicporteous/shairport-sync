@@ -1559,6 +1559,8 @@ struct pairings {
   struct pairings *next;
 } *pairings;
 
+static pthread_mutex_t pairings_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static struct pairings *pairing_find(const char *device_id) {
   for (struct pairings *pairing = pairings; pairing; pairing = pairing->next) {
     if (strcmp(device_id, pairing->device_id) == 0)
@@ -1567,13 +1569,15 @@ static struct pairings *pairing_find(const char *device_id) {
   return NULL;
 }
 
-static void pairing_add(uint8_t public_key[32], const char *device_id) {
+static int pairing_add(uint8_t public_key[32], const char *device_id) {
   struct pairings *pairing = calloc(1, sizeof(struct pairings));
+  if (!pairing) return -1;
   snprintf(pairing->device_id, sizeof(pairing->device_id), "%s", device_id);
   memcpy(pairing->public_key, public_key, sizeof(pairing->public_key));
 
   pairing->next = pairings;
   pairings = pairing;
+  return 0;
 }
 
 static void pairing_remove(struct pairings *pairing) {
@@ -1591,41 +1595,222 @@ static void pairing_remove(struct pairings *pairing) {
   free(pairing);
 }
 
+#ifdef CONFIG_MRP_INTERFACE
+static int pairings_initialised;
+
+// The file contains enrolled controller public keys and the Home access flag.
+// Bind it to this receiver so two instances cannot silently share an identity.
+static int pairing_save_locked(void) {
+  if (!config.homekit_pairing_file) return 0;
+  plist_t state = plist_new_dict(), peers = plist_new_array();
+  plist_dict_set_item(state, "Identifier", plist_new_string(config.airplay_pi));
+  plist_dict_set_item(state, "PublicKey", plist_new_data((char *)config.airplay_pk, 32));
+  plist_dict_set_item(state, "HomeEnabled", plist_new_bool(config.enable_HK_Access_Control));
+  for (struct pairings *pairing = pairings; pairing; pairing = pairing->next) {
+    plist_t peer = plist_new_dict();
+    plist_dict_set_item(peer, "Identifier", plist_new_string(pairing->device_id));
+    plist_dict_set_item(peer, "PublicKey", plist_new_data((char *)pairing->public_key, 32));
+    plist_array_append_item(peers, peer);
+  }
+  plist_dict_set_item(state, "Pairings", peers);
+  char *data = NULL; uint32_t size = 0;
+  plist_to_bin(state, &data, &size); plist_free(state);
+  char *temporary = malloc(strlen(config.homekit_pairing_file) + 12);
+  int result = -1;
+  if (temporary && data && size) {
+    sprintf(temporary, "%s.tmpXXXXXX", config.homekit_pairing_file);
+    int fd = mkstemp(temporary); // mode 0600, same directory for atomic replacement
+    if (fd >= 0) {
+      uint32_t written = 0;
+      while (written < size) {
+        ssize_t count = write(fd, data + written, size - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        written += count;
+      }
+      int synced = written == size && fsync(fd) == 0;
+      int closed = close(fd) == 0;
+      if (synced && closed && rename(temporary, config.homekit_pairing_file) == 0) result = 0;
+      if (result) unlink(temporary);
+    }
+  }
+  free(temporary); free(data);
+  if (result) warn("Could not save HomeKit pairing state; check the pairing file directory is writable.");
+  return result;
+}
+
+int rtsp_pairings_init(void) {
+  int old_cancel_state;
+  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+  pthread_mutex_lock(&pairings_lock);
+  if (pairings_initialised) {
+    pthread_mutex_unlock(&pairings_lock);
+    pthread_setcancelstate(old_cancel_state, NULL);
+    return 0;
+  }
+  int result = -1, fd = -1;
+  char *data = NULL, *identifier = NULL, *public_key = NULL;
+  uint64_t key_size = 0;
+  plist_t state = NULL;
+  if (!config.homekit_pairing_file) {
+    warn("HomeKit pairing state is in memory only. Set general.homekit_pairing_file on persistent storage to retain Home pairing across restarts.");
+    result = 0;
+    goto out;
+  }
+  fd = open(config.homekit_pairing_file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) {
+    if (errno == ENOENT) result = pairing_save_locked(); // also check directory writability
+    goto out;
+  }
+  struct stat info;
+  if (fstat(fd, &info) || !S_ISREG(info.st_mode) || info.st_size <= 0 || info.st_size > 1024 * 1024)
+    goto out;
+  data = malloc(info.st_size);
+  if (!data) goto out;
+  size_t received = 0;
+  while (received < (size_t)info.st_size) {
+    ssize_t count = read(fd, data + received, info.st_size - received);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) goto out;
+    received += count;
+  }
+  plist_from_memory(data, received, &state);
+  if (!state || plist_get_node_type(state) != PLIST_DICT) goto out;
+  plist_t id = plist_dict_get_item(state, "Identifier"), key = plist_dict_get_item(state, "PublicKey"),
+          enabled = plist_dict_get_item(state, "HomeEnabled"), peers = plist_dict_get_item(state, "Pairings");
+  if (!id || plist_get_node_type(id) != PLIST_STRING || !key || plist_get_node_type(key) != PLIST_DATA ||
+      !enabled || plist_get_node_type(enabled) != PLIST_BOOLEAN || !peers ||
+      plist_get_node_type(peers) != PLIST_ARRAY || plist_array_get_size(peers) > 256) goto out;
+  plist_get_string_val(id, &identifier); plist_get_data_val(key, &public_key, &key_size);
+  if (!identifier || strcmp(identifier, config.airplay_pi) || !public_key || key_size != 32 ||
+      memcmp(public_key, config.airplay_pk, 32)) goto out;
+  free(identifier); identifier = NULL; free(public_key); public_key = NULL;
+  for (uint32_t i = 0; i < plist_array_get_size(peers); i++) {
+    plist_t peer = plist_array_get_item(peers, i);
+    if (!peer || plist_get_node_type(peer) != PLIST_DICT) goto out;
+    id = plist_dict_get_item(peer, "Identifier"); key = plist_dict_get_item(peer, "PublicKey");
+    if (!id || plist_get_node_type(id) != PLIST_STRING || !key || plist_get_node_type(key) != PLIST_DATA)
+      goto out;
+    plist_get_string_val(id, &identifier); plist_get_data_val(key, &public_key, &key_size);
+    if (!identifier || !*identifier || strlen(identifier) >= sizeof(pairings->device_id) ||
+        !public_key || key_size != 32 || pairing_find(identifier) ||
+        pairing_add((uint8_t *)public_key, identifier)) goto out;
+    free(identifier); identifier = NULL; free(public_key); public_key = NULL;
+  }
+  uint8_t home_enabled = 0;
+  plist_get_bool_val(enabled, &home_enabled);
+  config.enable_HK_Access_Control = home_enabled;
+  if (home_enabled) config.airplay_statusflags |= (1 << 10);
+  else config.airplay_statusflags &= ~(1 << 10);
+  result = 0;
+  debug(2, "HomeKit pairing state loaded; Home access %s.", home_enabled ? "enabled" : "disabled");
+out:
+  if (fd >= 0) close(fd);
+  free(data); free(identifier); free(public_key); plist_free(state);
+  if (result) { while (pairings) pairing_remove(pairings); }
+  else pairings_initialised = 1;
+  pthread_mutex_unlock(&pairings_lock);
+  pthread_setcancelstate(old_cancel_state, NULL);
+  return result;
+}
+#endif
+
 static int pairing_add_cb(uint8_t public_key[32], const char *device_id,
                           void *cb_arg __attribute__((unused))) {
   debug(1, "pair-add cb for %s", device_id);
 
+#ifdef CONFIG_MRP_INTERFACE
+  if (rtsp_pairings_init()) return -1;
+#endif
+  if (!public_key || !device_id || !*device_id || strlen(device_id) >= sizeof(pairings->device_id))
+    return -1;
+  int old_cancel_state;
+  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+  pthread_mutex_lock(&pairings_lock);
   struct pairings *pairing = pairing_find(device_id);
-  if (pairing) {
-    memcpy(pairing->public_key, public_key, sizeof(pairing->public_key));
-    return 0;
+#ifdef CONFIG_MRP_INTERFACE
+  if (!pairing) {
+    unsigned count = 0;
+    for (struct pairings *peer = pairings; peer; peer = peer->next) count++;
+    if (count >= 256) {
+      pthread_mutex_unlock(&pairings_lock);
+      pthread_setcancelstate(old_cancel_state, NULL);
+      return -1;
+    }
   }
-
-  pairing_add(public_key, device_id);
-  return 0;
+  uint8_t previous_key[32];
+  if (pairing) memcpy(previous_key, pairing->public_key, 32);
+#endif
+  int result = 0;
+  if (pairing) memcpy(pairing->public_key, public_key, sizeof(pairing->public_key));
+  else result = pairing_add(public_key, device_id);
+#ifdef CONFIG_MRP_INTERFACE
+  if (!result && pairing_save_locked()) {
+    if (pairing) memcpy(pairing->public_key, previous_key, 32);
+    else pairing_remove(pairing_find(device_id));
+    result = -1;
+  }
+#endif
+  pthread_mutex_unlock(&pairings_lock);
+  pthread_setcancelstate(old_cancel_state, NULL);
+  return result;
 }
 
 static int pairing_remove_cb(uint8_t public_key[32] __attribute__((unused)), const char *device_id,
                              void *cb_arg __attribute__((unused))) {
   debug(1, "pair-remove cb for %s", device_id);
-
+#ifdef CONFIG_MRP_INTERFACE
+  if (rtsp_pairings_init()) return -1;
+#endif
+  int old_cancel_state;
+  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+  pthread_mutex_lock(&pairings_lock);
   struct pairings *pairing = pairing_find(device_id);
-  if (!pairing) {
-    debug(1, "pair-remove callback for device \"%s\".", device_id);
-    return -1;
+  int result = pairing ? 0 : -1;
+  if (pairing) {
+#ifdef CONFIG_MRP_INTERFACE
+    uint8_t previous_key[32]; memcpy(previous_key, pairing->public_key, 32);
+#endif
+    pairing_remove(pairing);
+#ifdef CONFIG_MRP_INTERFACE
+    if (pairing_save_locked()) { pairing_add(previous_key, device_id); result = -1; }
+#endif
   }
-
-  pairing_remove(pairing);
-  return 0;
+  pthread_mutex_unlock(&pairings_lock);
+  pthread_setcancelstate(old_cancel_state, NULL);
+  return result;
 }
+
+#ifdef CONFIG_MRP_INTERFACE
+static int pairing_get_cb(uint8_t public_key[32], const char *device_id,
+                           void *cb_arg __attribute__((unused))) {
+  if (rtsp_pairings_init()) return -1;
+  pthread_mutex_lock(&pairings_lock);
+  struct pairings *pairing = pairing_find(device_id);
+  int result = pairing ? 0 : -1;
+  if (pairing) memcpy(public_key, pairing->public_key, 32);
+  pthread_mutex_unlock(&pairings_lock);
+  return result;
+}
+
+static int homekit_identity_request(rtsp_message *req) {
+  const char *version = msg_get_header(req, "X-Apple-HKP");
+  return version && (!strcmp(version, "6") || !strcmp(version, "7"));
+}
+#endif
 
 static void pairing_list_cb(pair_cb enum_cb, void *enum_cb_arg,
                             void *cb_arg __attribute__((unused))) {
   debug(1, "pair-list cb");
 
+#ifdef CONFIG_MRP_INTERFACE
+  if (rtsp_pairings_init()) return;
+#endif
+  pthread_mutex_lock(&pairings_lock);
   for (struct pairings *pairing = pairings; pairing; pairing = pairing->next) {
     enum_cb(pairing->public_key, pairing->device_id, enum_cb_arg);
   }
+  pthread_mutex_unlock(&pairings_lock);
 }
 
 void handle_pair_add(rtsp_conn_info *conn __attribute__((unused)), rtsp_message *req,
@@ -1704,13 +1889,27 @@ void handle_pair_verify(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *r
 
   if (!conn->ap2_pairing_context.verify_ctx) {
     conn->ap2_pairing_context.verify_ctx =
-        pair_verify_new(PAIR_SERVER_HOMEKIT, NULL, NULL, NULL, config.airplay_device_id);
+        pair_verify_new(PAIR_SERVER_HOMEKIT, NULL,
+#ifdef CONFIG_MRP_INTERFACE
+                        pairing_get_cb,
+#else
+                        NULL,
+#endif
+                        NULL, config.airplay_device_id);
     if (!conn->ap2_pairing_context.verify_ctx) {
       debug(1, "Error creating verify context");
       resp->respcode = 500; // Internal Server Error
       goto out;
     }
   }
+
+#ifdef CONFIG_MRP_INTERFACE
+  if (homekit_identity_request(req) &&
+      pair_verify_set_server_identifier(conn->ap2_pairing_context.verify_ctx, config.airplay_pi)) {
+    resp->respcode = 500;
+    goto out;
+  }
+#endif
 
   ret = pair_verify(&body, &body_len, conn->ap2_pairing_context.verify_ctx,
                     (const uint8_t *)req->content, req->contentlength);
@@ -1720,23 +1919,34 @@ void handle_pair_verify(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *r
     goto out;
   }
 
-  /*
-    ret = pair_verify_result(&result, conn->ap2_pairing_context.verify_ctx);
-    if (ret == 0 && result->shared_secret_len > 0) {
-      conn->ap2_pairing_context.control_cipher_bundle.cipher_ctx =
-          pair_cipher_new(PAIR_SERVER_HOMEKIT, 3, result->shared_secret, result->shared_secret_len);
-      if (!conn->ap2_pairing_context.control_cipher_bundle.cipher_ctx) {
-        debug(1, "Error setting up rtsp control channel ciphering\n");
-        goto out;
-      }
-      conn->ap2_pairing_context.event_cipher_bundle.cipher_ctx =
-          pair_cipher_new(PAIR_SERVER_HOMEKIT, 4, result->shared_secret, result->shared_secret_len);
-      if (!conn->ap2_pairing_context.event_cipher_bundle.cipher_ctx) {
-        debug(1, "Error setting up rtsp event channel ciphering\n");
-        goto out;
-      }
+#ifdef CONFIG_MRP_INTERFACE
+  struct pair_result *verified = NULL;
+  if (pair_verify_result(&verified, conn->ap2_pairing_context.verify_ctx) == 0 &&
+      verified->shared_secret_len > 0) {
+    // M4 is plaintext. Encryption is activated when the next request is read.
+    // Never accept unverified/unknown peer keys or replace a live cipher in place.
+    if (conn->ap2_pairing_context.control_cipher_bundle.cipher_ctx) {
+      resp->respcode = 470;
+      goto out;
     }
-  */
+    struct pair_cipher_context *control = pair_cipher_new(PAIR_SERVER_HOMEKIT, 3,
+        verified->shared_secret, verified->shared_secret_len, "");
+    struct pair_cipher_context *event = pair_cipher_new(PAIR_SERVER_HOMEKIT, 4,
+        verified->shared_secret, verified->shared_secret_len, "");
+    if (!control || !event) {
+      pair_cipher_free(control); pair_cipher_free(event);
+      resp->respcode = 500;
+      goto out;
+    }
+    conn->pair_setup_result = verified; // owned by verify_ctx, alive for the connection
+    conn->ap2_pairing_context.control_cipher_bundle.cipher_ctx = control;
+    conn->ap2_pairing_context.control_cipher_bundle.description = strdup("Control Stream");
+    conn->ap2_pairing_context.event_cipher_bundle.cipher_ctx = event;
+    conn->ap2_pairing_context.event_cipher_bundle.description = strdup("Event Stream");
+    debug(2, "Connection %d: HomeKit pair verification completed; encryption prepared.",
+          conn->connection_number);
+  }
+#endif
 
 out:
   resp->content = (char *)body; // these will be freed when the data is sent
@@ -1775,13 +1985,27 @@ void handle_pair_setup(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *re
 
   if (!conn->ap2_pairing_context.setup_ctx) {
     conn->ap2_pairing_context.setup_ctx =
-        pair_setup_new(PAIR_SERVER_HOMEKIT, config.password, NULL, NULL, config.airplay_device_id);
+        pair_setup_new(PAIR_SERVER_HOMEKIT, config.password,
+#ifdef CONFIG_MRP_INTERFACE
+                       pairing_add_cb,
+#else
+                       NULL,
+#endif
+                       NULL, config.airplay_device_id);
     if (!conn->ap2_pairing_context.setup_ctx) {
       debug(1, "Error creating setup context");
       resp->respcode = 500; // Internal Server Error
       goto out;
     }
   }
+
+#ifdef CONFIG_MRP_INTERFACE
+  if (homekit_identity_request(req) &&
+      pair_setup_set_server_identifier(conn->ap2_pairing_context.setup_ctx, config.airplay_pi)) {
+    resp->respcode = 500;
+    goto out;
+  }
+#endif
 
   ret = pair_setup(&body, &body_len, conn->ap2_pairing_context.setup_ctx,
                    (const uint8_t *)req->content, req->contentlength);
@@ -1950,6 +2174,12 @@ void handle_configure(rtsp_conn_info *conn __attribute__((unused)),
         conn->ap2_client_name, req->path, req->contentlength);
   debug_log_rtsp_message_conn(conn, 4, "POST /configure req:", req);
 
+#ifdef CONFIG_MRP_INTERFACE
+  if (rtsp_pairings_init()) { resp->respcode = 500; return; }
+  int old_cancel_state;
+  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+  pthread_mutex_lock(&pairings_lock);
+#endif
   int existingEnable_HK_Access_Control = config.enable_HK_Access_Control;
 
   plist_t response_plist = plist_new_dict();
@@ -1990,11 +2220,28 @@ void handle_configure(rtsp_conn_info *conn __attribute__((unused)),
     debug(1, "no plist in POST /configure request");
   }
 
+#ifdef CONFIG_MRP_INTERFACE
+  if (config.enable_HK_Access_Control != existingEnable_HK_Access_Control) {
+    int result = pairing_save_locked();
+    if (result) {
+      config.enable_HK_Access_Control = existingEnable_HK_Access_Control;
+      plist_free(response_plist);
+      resp->respcode = 500;
+      pthread_mutex_unlock(&pairings_lock);
+      pthread_setcancelstate(old_cancel_state, NULL);
+      return;
+    }
+  }
+#endif
   if (config.enable_HK_Access_Control != 0) {
     config.airplay_statusflags |= (1 << 10); // DeviceWasSetupForHKAccessControl
   } else {
     config.airplay_statusflags &= (0xffffffff - (1 << 10));
   }
+#ifdef CONFIG_MRP_INTERFACE
+  pthread_mutex_unlock(&pairings_lock);
+  pthread_setcancelstate(old_cancel_state, NULL);
+#endif
 
   if (config.enable_HK_Access_Control != existingEnable_HK_Access_Control) {
     build_bonjour_strings(principal_conn);

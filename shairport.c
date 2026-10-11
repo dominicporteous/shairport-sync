@@ -1527,6 +1527,10 @@ int parse_options(int argc, char **argv) {
 #endif
 #ifdef CONFIG_AIRPLAY_2
       long long aid;
+#ifdef CONFIG_MRP_INTERFACE
+      if (config_lookup_non_empty_string(config.cfg, "general.homekit_pairing_file", &str))
+        config.homekit_pairing_file = strdup(str);
+#endif
 
       // replace the airplay_device_id with this, if provided
       if (config_lookup_int64(config.cfg, "general.airplay_device_id", &aid)) {
@@ -2004,6 +2008,10 @@ int parse_options(int argc, char **argv) {
 
   config.airplay_pi = generate_device_uuid(config.airplay_device_id);
   config.airplay_pgid = generate_random_uuid();
+#ifdef CONFIG_MRP_INTERFACE
+  if (rtsp_pairings_init())
+    die("Could not load HomeKit pairing state. Check general.homekit_pairing_file and receiver identity.");
+#endif
 #endif
 
 #ifdef CONFIG_LIBDAEMON
@@ -2337,6 +2345,9 @@ void exit_function() {
       free(config.airplay_device_id);
     if (config.airplay_pi)
       free(config.airplay_pi);
+#ifdef CONFIG_MRP_INTERFACE
+    free(config.homekit_pairing_file);
+#endif
     if (config.airplay_pgid)
       free(config.airplay_pgid);
     if (config.airplay_psi)

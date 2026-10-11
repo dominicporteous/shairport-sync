@@ -3,6 +3,7 @@ Unreleased
 **Enhancements**
 * Add an opt-in native Media Remote Protocol endpoint (`--with-airplay-2 --with-mrp-interface`) for paired AirPlay controllers. It serves now-playing metadata, artwork and source-supported playback controls over the encrypted type-130 data channel. See [MRP setup and validation](mrp/README.md). Apple Home device validation remains required.
 * Relay metadata and supported controls to remote controllers that establish only the AirPlay event channel, and forward their authenticated RTSP media commands to the active source. Derive playing/paused state from iOS playback-rate updates and add transport diagnostics. Home UI display remains unverified.
+* Align Home pairing responses with the UUID returned by `/configure`, retain the advertised receiver key, verify enrolled controller signatures and enable encryption after permanent pair verification. Add optional `general.homekit_pairing_file` storage for enrollment, removals and the Home access flag across restarts, with pairing and restart regression tests.
 
 Version 5.6-dev-157-g611d5bc8
 ==

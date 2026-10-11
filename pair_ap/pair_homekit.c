@@ -2446,8 +2446,11 @@ server_setup_response3(size_t *len, struct pair_setup_context *handle)
       RETURN_ERROR(PAIR_STATUS_INVALID, "Setup response 3: error appending public key to TLV");
     }
 
-  if (sctx->add_cb)
-    sctx->add_cb(handle->result.client_public_key, handle->result.device_id, sctx->add_cb_arg);
+  if (sctx->add_cb && sctx->add_cb(handle->result.client_public_key, handle->result.device_id,
+                                sctx->add_cb_arg) < 0)
+    {
+      RETURN_ERROR(PAIR_STATUS_INVALID, "Could not store pairing record");
+    }
 
   handle->status = PAIR_STATUS_COMPLETED;
 
@@ -2487,6 +2490,22 @@ server_verify_new(struct pair_verify_context *handle, const char *client_setup_k
 
   server_keypair(vctx->server_public_key, vctx->server_private_key, vctx->device_id);
 
+  return 0;
+}
+
+int pair_verify_set_server_identifier(struct pair_verify_context *handle, const char *identifier)
+{
+  if (!handle || handle->type != &pair_server_homekit || !identifier || !*identifier ||
+      strlen(identifier) >= sizeof(handle->vctx.server.device_id)) return -1;
+  snprintf(handle->vctx.server.device_id, sizeof(handle->vctx.server.device_id), "%s", identifier);
+  return 0;
+}
+
+int pair_setup_set_server_identifier(struct pair_setup_context *handle, const char *identifier)
+{
+  if (!handle || handle->type != &pair_server_homekit || !identifier || !*identifier ||
+      strlen(identifier) >= sizeof(handle->sctx.server.device_id)) return -1;
+  snprintf(handle->sctx.server.device_id, sizeof(handle->sctx.server.device_id), "%s", identifier);
   return 0;
 }
 
@@ -2776,10 +2795,10 @@ server_add_remove_request(pair_cb cb, void *cb_arg, const uint8_t *in, size_t in
 
   memcpy(id_str, device_id->value, device_id->size);
 
-  cb(public_key, id_str, cb_arg);
+  int ret = cb(public_key, id_str, cb_arg);
 
   pair_tlv_free(request);
-  return 0;
+  return ret;
 
  error:
   pair_tlv_free(request);

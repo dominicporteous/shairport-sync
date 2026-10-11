@@ -164,6 +164,13 @@ pair_verify_new(enum pair_type type, const char *client_setup_keys, pair_cb get_
 void
 pair_verify_free(struct pair_verify_context *vctx);
 
+/* Override the advertised server identifier while retaining its existing keys.
+ * HomeKit administration uses the UUID returned by /configure, not the MAC ID.
+ * Supported only for the HomeKit server implementation; returns -1 otherwise.
+ */
+int pair_verify_set_server_identifier(struct pair_verify_context *vctx, const char *identifier);
+int pair_setup_set_server_identifier(struct pair_setup_context *sctx, const char *identifier);
+
 /* Returns last error message
  */
 const char *

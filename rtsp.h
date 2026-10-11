@@ -36,6 +36,9 @@ extern rtsp_conn_info *principal_conn;
 extern pthread_rwlock_t principal_conn_lock;
 
 #ifdef CONFIG_AIRPLAY_2
+#ifdef CONFIG_MRP_INTERFACE
+int rtsp_pairings_init(void);
+#endif
 ssize_t read_encrypted(int fd, pair_cipher_bundle *ctx, void *buf, size_t count);
 ssize_t write_encrypted(int fd, pair_cipher_bundle *ctx, const void *buf, size_t count);
 

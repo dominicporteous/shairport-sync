@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory() as directory:
     binary = pathlib.Path(directory)/'mrp_channel_test'
     subprocess.run([os.environ.get('CC','cc'),'-DHAVE_CONFIG_H','-I'+str(build),'-I'+str(root),
         '--include=utilities/debug.h',*shlex.split(os.environ.get('CPPFLAGS','')),*flags,
-        str(root/'tests/mrp_channel_test.c'),*objects,*libraries,
+        str(root/os.environ.get('MRP_TEST_SOURCE','tests/mrp_channel_test.c')),*objects,*libraries,
         *shlex.split(os.environ.get('LDFLAGS','')),'-pthread','-lstdc++','-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True,timeout=20)
 PY

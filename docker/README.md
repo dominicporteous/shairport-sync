@@ -17,6 +17,9 @@ The main AirPlay 2 image enables native MRP and installs protobuf-c build/runtim
 dependencies automatically. The classic image does not enable MRP. A successful
 image build does not validate playback controls in Apple Home; see
 [MRP validation](../mrp/README.md).
+For persistent Home pairing, set `general.homekit_pairing_file` to a unique file
+per receiver in a writable persistent volume. Create its parent directory before
+starting the container; see the MRP guide for a multi-receiver example.
 
 Available at: https://hub.docker.com/r/mikebrady/shairport-sync
 
