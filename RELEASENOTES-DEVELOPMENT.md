@@ -1,3 +1,8 @@
+Unreleased
+==
+**Enhancements**
+* Add an opt-in native Media Remote Protocol endpoint (`--with-airplay-2 --with-mrp-interface`) for paired AirPlay controllers. It serves now-playing metadata, artwork and source-supported playback controls over the encrypted type-130 data channel. See [MRP setup and validation](mrp/README.md). Apple Home device validation remains required.
+
 Version 5.6-dev-157-g611d5bc8
 ==
 **Bug Fix**

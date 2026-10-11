@@ -380,6 +380,20 @@ fi
 
 AM_CONDITIONAL([ADD_DBUS_SUPPORT], [test "x$with_mpris_interface" = "xyes" || test "x$with_dbus_interface" = "xyes"])
 
+# Optional native Media Remote Protocol endpoint for paired Apple controllers.
+AC_ARG_WITH([mrp-interface], [AS_HELP_STRING([--with-mrp-interface],
+  [expose AirPlay 2 metadata and playback controls via encrypted MRP])])
+if test "x$with_mrp_interface" = "xyes"; then
+  if test "x$with_airplay_2" != "xyes"; then
+    AC_MSG_ERROR([--with-mrp-interface requires --with-airplay-2])
+  fi
+  PKG_CHECK_MODULES([MRP], [libprotobuf-c >= 1.0],
+    [CFLAGS="${MRP_CFLAGS} ${CFLAGS}" LIBS="${MRP_LIBS} ${LIBS}"],
+    [AC_MSG_ERROR([MRP requires libprotobuf-c-dev])])
+  AC_DEFINE([CONFIG_MRP_INTERFACE], 1, [Native encrypted Media Remote Protocol support])
+fi
+AM_CONDITIONAL([USE_MRP_INTERFACE], [test "x$with_mrp_interface" = "xyes"])
+
 # Look for mqtt flag
 AC_ARG_WITH(mqtt-client, [AS_HELP_STRING([--with-mqtt-client],[include a client for MQTT -- the Message Queuing Telemetry Transport protocol])])
 if test "x$with_mqtt_client" = "xyes" ; then
@@ -392,7 +406,7 @@ if test "x$with_mqtt_client" = "xyes" && test "x$with_avahi" != "xyes" ; then
   AC_MSG_WARN([MQTT needs Avahi for remote control functionality. With the current configuration settings, only metadata publishing will be supported.])
 fi
 
-if test "x$with_mpris_interface" = "xyes" || test "x$with_dbus_interface" = "xyes" || test "x$with_mqtt_client" = "xyes" ; then
+if test "x$with_mpris_interface" = "xyes" || test "x$with_dbus_interface" = "xyes" || test "x$with_mqtt_client" = "xyes" || test "x$with_mrp_interface" = "xyes" ; then
   REQUESTED_EXTENDED_METADATA_AND_REMOTE_CONTROL_SUPPORT=1
   AC_DEFINE([CONFIG_METADATA_HUB], 1, [Needed by the compiler.])
   AC_DEFINE([CONFIG_DACP_CLIENT], 1, [DACP client needed for extended metadata support.])

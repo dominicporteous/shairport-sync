@@ -77,6 +77,7 @@ RUN apk -U add \
         pipewire-dev \
         mosquitto-dev \
         popt-dev \
+        protobuf-c-dev \
         pulseaudio-dev \
         soxr-dev \
         libplist-util \
@@ -100,7 +101,7 @@ COPY --from=ffmpeglite /ffmpeg_build/include/  /usr/local/include
 WORKDIR /shairport-sync/build
 RUN autoreconf -i ../
 RUN ../configure --sysconfdir=/etc --with-alsa --with-pulseaudio --with-soxr --with-avahi --with-ssl=openssl \
-        --with-airplay-2 --with-metadata --with-metadata-pipe --with-dummy --with-pipe --with-dbus-interface \
+        --with-airplay-2 --with-mrp-interface --with-metadata --with-metadata-pipe --with-dummy --with-pipe --with-dbus-interface \
         --with-stdout --with-mpris-interface --with-mqtt-client \
         --with-convolution --with-pipewire
 RUN make
@@ -132,7 +133,7 @@ WORKDIR /shairport-sync/build
 # Rebuild with no optimisation and debug symbols in place
 
 RUN CFLAGS="-O0 -g" CXXFLAGS="-O0 -g" ../configure --sysconfdir=/etc --with-alsa --with-pulseaudio --with-soxr --with-avahi --with-ssl=openssl \
-        --with-airplay-2 --with-metadata --with-metadata-pipe --with-dummy --with-pipe --with-dbus-interface \
+        --with-airplay-2 --with-mrp-interface --with-metadata --with-metadata-pipe --with-dummy --with-pipe --with-dbus-interface \
         --with-stdout --with-mpris-interface --with-mqtt-client \
         --with-convolution --with-pipewire
 RUN make clean
@@ -183,6 +184,7 @@ RUN apk -U add \
         dbus \
         glib \
         libconfig \
+        protobuf-c \
         libgcrypt \
         libplist \
         pipewire \

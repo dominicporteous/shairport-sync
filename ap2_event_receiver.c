@@ -197,6 +197,12 @@ void *ap2_event_receiver(void *arg) {
           "socket %d.",
           conn->connection_number, conn->event_socket, conn->event_channel_fd);
     pthread_cleanup_push(ap2_event_receiver_cleanup_handler, arg);
+#ifdef CONFIG_MRP_INTERFACE
+    // A source that stops answering must not block an MRP controller indefinitely.
+    struct timeval timeout = {.tv_sec = 2};
+    setsockopt(conn->event_channel_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(conn->event_channel_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
 
     ap2_event_send_update_info(conn);
 

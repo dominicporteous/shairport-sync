@@ -1,0 +1,75 @@
+// Wire-compatible subset of Apple's Media Remote Protocol, as documented by
+// pyatv (https://github.com/postlund/pyatv/tree/master/pyatv/protocols/mrp/protobuf).
+// Unknown fields are retained by protobuf-c. Do not renumber these fields.
+syntax = "proto2";
+package mrp;
+message Protocol {
+ optional uint32 type = 1;
+ optional string identifier = 2;
+ optional uint32 error_code = 4;
+ optional SendCommand send_command = 6;
+ optional CommandResult command_result = 7;
+ optional State state = 9;
+ optional DeviceInfo device_info = 20;
+ optional Updates updates = 21;
+ optional ClientMessage client_message = 50;
+ optional PlayerMessage player_message = 51;
+ optional string unique_identifier = 85;
+}
+message DeviceInfo {
+ optional string unique_identifier = 1;
+ required string name = 2;
+ optional string model = 3;
+ optional string bundle_identifier = 5;
+ optional uint32 protocol_version = 7;
+ optional uint32 last_supported_message_type = 8;
+ optional bool connected = 11;
+ optional string device_uid = 19;
+ optional uint32 device_class = 21;
+ optional bool is_airplay_active = 30;
+}
+message Updates {
+ optional bool artwork = 1;
+ optional bool now_playing = 2;
+}
+message Client { optional string bundle_identifier = 2; optional string display_name = 7; }
+message Player { optional string identifier = 1; optional string display_name = 2; optional bool is_default = 3; }
+message PlayerPath { optional Client client = 2; optional Player player = 3; }
+message ClientMessage { optional Client client = 1; }
+message PlayerMessage { optional PlayerPath path = 1; }
+message State {
+ optional NowPlaying now_playing = 1;
+ optional SupportedCommands supported_commands = 2;
+ optional Queue queue = 3;
+ optional string display_id = 4;
+ optional string display_name = 5;
+ optional uint32 playback_state = 6;
+ optional PlayerPath path = 9;
+}
+message NowPlaying {
+ optional string album = 1;
+ optional string artist = 2;
+ optional double duration = 3;
+ optional double elapsed = 4;
+ optional float rate = 5;
+ optional double timestamp = 8;
+ optional string title = 9;
+}
+message SupportedCommands { repeated CommandInfo commands = 1; }
+message CommandInfo { optional uint32 command = 1; optional bool enabled = 2; }
+message Queue { optional uint32 location = 1; repeated Item items = 2; }
+message Item { optional string identifier = 1; optional ItemMetadata metadata = 2; optional bytes artwork = 3; }
+message ItemMetadata {
+ optional string title = 1;
+ optional string album = 6;
+ optional string artist = 7;
+ optional double duration = 14;
+ optional bool artwork_available = 19;
+ optional double elapsed = 35;
+ optional float rate = 39;
+ optional uint32 media_type = 64;
+ optional double elapsed_timestamp = 74;
+}
+message SendCommand { optional uint32 command = 1; optional Options options = 2; optional PlayerPath path = 3; }
+message Options { optional double position = 9; }
+message CommandResult { optional uint32 error = 1; optional uint32 status = 2; }

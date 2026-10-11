@@ -1,5 +1,23 @@
 # Shairport Sync Docker Image
 
+### Publishing from a fork to GHCR
+
+Enable GitHub Actions in your fork. The Docker workflow uses the built-in
+`GITHUB_TOKEN` with `packages: write` and defaults to `ghcr.io/<owner>/<repository>`.
+No personal access token or `DOCKER_REGISTRY_*` secrets are required. To override
+the image path, set the repository Actions variable `DOCKER_IMAGE_NAME` (for
+example, `dominicporteous/shairport-sync`); use a package the repository can write.
+
+Push committed changes to `development` to publish `:development` and
+`:development-classic`, or manually run the workflow on that branch. Pull requests
+build without publishing. If an existing GHCR package denies the workflow access,
+grant this repository write access under the package's Actions access settings.
+
+The main AirPlay 2 image enables native MRP and installs protobuf-c build/runtime
+dependencies automatically. The classic image does not enable MRP. A successful
+image build does not validate playback controls in Apple Home; see
+[MRP validation](../mrp/README.md).
+
 Available at: https://hub.docker.com/r/mikebrady/shairport-sync
 
 Shairport Sync provides limited AirPlay 2 functionality. Versions with tags including `-classic` only provide classic AirPlay (aka "AirPlay 1"), the same as Shairport Sync versions up to 3.3.9.

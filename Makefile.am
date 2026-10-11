@@ -373,3 +373,15 @@ if INSTALL_CONFIG_FILES
 install-exec-hook: install-config-files
 
 endif
+
+if USE_MRP_INTERFACE
+shairport_sync_SOURCES += ap2_mrp.c ap2_mrp.h mrp/state.c mrp/state.h \
+  mrp/messages.pb-c.c mrp/messages.pb-c.h
+endif
+if USE_MRP_INTERFACE
+check-local:
+	$(SHELL) $(top_srcdir)/tests/mrp_test.sh
+	$(SHELL) $(top_srcdir)/tests/mrp_channel_test.sh $(abs_builddir)
+endif
+
+EXTRA_DIST = mrp/messages.proto mrp/README.md tests/mrp_test.c tests/mrp_test.sh tests/mrp_channel_test.c tests/mrp_channel_test.sh

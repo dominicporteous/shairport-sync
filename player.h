@@ -429,6 +429,10 @@ typedef struct {
   timing_t timing_type;                 // are we using NTP or PTP on this connection?
 
   pthread_t *rtp_event_thread;
+#ifdef CONFIG_MRP_INTERFACE
+  pthread_t *mrp_thread;
+  uint64_t mrp_data_seed;
+#endif
   pthread_t *rtp_data_thread;
   pthread_t rtp_ap2_control_thread;
   pthread_t rtp_realtime_audio_thread;

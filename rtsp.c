@@ -94,6 +94,10 @@
 #ifdef CONFIG_AIRPLAY_2
 #include "ap2_buffered_audio_processor.h"
 #include "ap2_event_receiver.h"
+#ifdef CONFIG_MRP_INTERFACE
+#include "ap2_mrp.h"
+#include "mrp/state.h"
+#endif
 #ifdef CONFIG_METADATA_HUB
 #include "metadata/metadata_hub_handle_command_plist.h"
 #endif
@@ -308,6 +312,9 @@ void stop_play() {
     config.airplay_statusflags &= (0xffffffff - (1 << 17)); // ReceiverSessionIsActive
     build_bonjour_strings(principal_conn);
     mdns_update(txt_records, secondary_txt_records);
+#ifdef CONFIG_MRP_INTERFACE
+    if (principal_conn) mrp_clear(principal_conn->connection_number);
+#endif
     principal_conn = NULL; // let it go
     debug(1, "Connection successfully closed.");
   }
@@ -331,6 +338,9 @@ void release_play_lock(rtsp_conn_info *conn) {
       debug(4, "Connection %d: (%s) has released play lock.", conn->connection_number,
             get_category_string(conn->airplay_stream_category));
     }
+#ifdef CONFIG_MRP_INTERFACE
+    if (principal_conn) mrp_clear(principal_conn->connection_number);
+#endif
     principal_conn = NULL; // let it go
   }
   pthread_rwlock_unlock(&principal_conn_lock);
@@ -383,6 +393,9 @@ play_lock_r get_play_lock(rtsp_conn_info *conn, int allow_session_interruption) 
       debug(4, "Connection %d: (%s) about to be terminated.", principal_conn->connection_number,
             get_category_string(conn->airplay_stream_category));
       rtsp_conn_info *previous_principal_conn = principal_conn;
+#ifdef CONFIG_MRP_INTERFACE
+      mrp_clear(previous_principal_conn->connection_number);
+#endif
       principal_conn = conn; // make the conn the new principal_conn
       debug(4, "Connection %d: (%s) is pre-empting play lock from connection %d.",
             conn->connection_number, get_category_string(conn->airplay_stream_category),
@@ -2048,6 +2061,16 @@ void handle_command(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
   (void) req;
   // first, check that this is an airplay 2 session
   if (conn->airplay_type == ap_2) {
+#ifdef CONFIG_MRP_INTERFACE
+    if (rtsp_message_contains_plist(req)) {
+      plist_t command = NULL;
+      plist_from_memory(req->content, req->contentlength, &command);
+      if (command) {
+        ap2_mrp_observe(conn, command);
+        plist_free(command);
+      }
+    }
+#endif
 #ifdef CONFIG_METADATA
     if (config.metadata_enabled != 0) {
       if (rtsp_message_contains_plist(req)) {
@@ -2894,11 +2917,40 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
             conn->connection_number, conn->client_ip_string);
       debug_log_rtsp_message(3, "Remote Control Stream SETUP incoming message", req);
 
+#ifdef CONFIG_MRP_INTERFACE
+      plist_t remote_stream = plist_get_node_type(streams) == PLIST_ARRAY &&
+                              plist_array_get_size(streams) == 1 ? plist_array_get_item(streams, 0) : NULL;
+      plist_t remote_type = plist_get_node_type(remote_stream) == PLIST_DICT ?
+                           plist_dict_get_item(remote_stream, "type") : NULL;
+      plist_t remote_seed = plist_get_node_type(remote_stream) == PLIST_DICT ?
+                           plist_dict_get_item(remote_stream, "seed") : NULL;
+      uint64_t stream_type = 0;
+      if (plist_get_node_type(remote_type) == PLIST_UINT) plist_get_uint_val(remote_type, &stream_type);
+      uint64_t data_seed = 0;
+      if (plist_get_node_type(remote_seed) == PLIST_UINT) plist_get_uint_val(remote_seed, &data_seed);
+      if (stream_type != 130 || plist_get_node_type(remote_seed) != PLIST_UINT ||
+          (conn->local_data_port && conn->mrp_data_seed != data_seed)) {
+        resp->respcode = 451;
+        plist_free(setupResponsePlist);
+        plist_free(messagePlist);
+        return;
+      }
+#endif
       plist_t seed_item = NULL;
       // the data port and listener thread may already have been set up
       // if so, the local_data_port will be non-zero
 
       if (conn->local_data_port == 0) {
+#ifdef CONFIG_MRP_INTERFACE
+        // Pair verification must have established an encrypted control session.
+        if (!conn->ap2_pairing_context.control_cipher_bundle.is_encrypted ||
+            !conn->pair_setup_result || conn->pair_setup_result->shared_secret_len == 0) {
+          resp->respcode = 470;
+          plist_free(setupResponsePlist);
+          plist_free(messagePlist);
+          return;
+        }
+#endif
         // set up data channel ciphering
         plist_t dict = plist_array_get_item(streams, 0);
         if (dict != NULL) {
@@ -2932,6 +2984,13 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
 
               debug(2, "Connection %d SETUP (RC): TCP Remote Control data port opened: %u.",
                     conn->connection_number, conn->local_data_port);
+#ifdef CONFIG_MRP_INTERFACE
+              conn->mrp_data_seed = data_seed;
+              conn->mrp_thread = malloc(sizeof(pthread_t));
+              if (!conn->mrp_thread) die("Could not allocate MRP thread");
+              named_pthread_create(conn->mrp_thread, NULL, &ap2_mrp_receiver, conn,
+                                   "ap2_mrp_%d", conn->connection_number);
+#endif
             } else {
               debug(1, "Connection %d: SETUP: Error setting up rtsp data channel ciphering.",
                     conn->connection_number);
@@ -2950,7 +3009,11 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
       plist_t coreResponseDict = plist_new_dict();
       plist_dict_set_item(coreResponseDict, "streamID", plist_new_uint(1));
       plist_dict_set_item(coreResponseDict, "type", plist_new_uint(130));
+#ifdef CONFIG_MRP_INTERFACE
+      if (conn->local_data_port != 0)
+#else
       if (seed_item != NULL)
+#endif
         plist_dict_set_item(coreResponseDict, "dataPort", plist_new_uint(conn->local_data_port));
 
       plist_t coreResponseArray = plist_new_array();
@@ -3937,6 +4000,17 @@ void rtsp_conversation_thread_cleanup_function(void *arg) {
       free(conn->session_key);
       conn->session_key = NULL;
     }
+
+#ifdef CONFIG_MRP_INTERFACE
+    mrp_clear(conn->connection_number);
+    if (conn->mrp_thread) {
+      pthread_cancel(*conn->mrp_thread);
+      pthread_join(*conn->mrp_thread, NULL);
+      free(conn->mrp_thread);
+      conn->mrp_thread = NULL;
+    }
+    if (conn->data_socket) safe_socket_close(&conn->data_socket);
+#endif
 
     // give the event receiver a chance to exit normally, if it exists
     if (conn->rtp_event_thread != NULL) {
