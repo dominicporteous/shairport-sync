@@ -63,7 +63,15 @@ void mrp_observe(unsigned source, plist_t command) {
     if (!current.info || string_is(plist_dict_get_item(params, "mergePolicy"), "replace")) {
       if (current.info) plist_free(current.info);
       current.info = plist_copy(value);
+      current.playback_state = plist_dict_get_size(value) ? 0 : 3;
     } else merge(current.info, value);
+    // iOS sends rate changes in npi-text without updateMRPlaybackState.
+    plist_t rate_node = plist_dict_get_item(value, "kMRMediaRemoteNowPlayingInfoPlaybackRate");
+    if (plist_get_node_type(rate_node) == PLIST_REAL) {
+      double rate = 0;
+      plist_get_real_val(rate_node, &rate);
+      if (isfinite(rate) && rate >= 0) current.playback_state = rate > 0 ? 1 : 2;
+    }
   } else if (commands) {
     if (current.commands) plist_free(current.commands);
     current.commands = plist_copy(value);
@@ -82,7 +90,7 @@ void mrp_clear(unsigned source) {
     if (current.info) plist_free(current.info);
     if (current.commands) plist_free(current.commands);
     current.info = NULL; current.commands = NULL; current.source = 0;
-    current.playback_state = 0; current.revision++;
+    current.playback_state = 3; current.revision++;
   }
   pthread_mutex_unlock(&lock);
 }
@@ -131,6 +139,42 @@ int mrp_command_enabled(const mrp_snapshot *s, uint32_t command) {
     if (enabled) return 1;
   }
   return 0;
+}
+
+static plist_t event_command(const char *type, plist_t params) {
+  plist_t command = plist_new_dict();
+  plist_dict_set_item(command, "type", plist_new_string(type));
+  plist_dict_set_item(command, "params", params);
+  return command;
+}
+plist_t mrp_event_info(const mrp_snapshot *s) {
+  plist_t params = plist_new_dict();
+  plist_dict_set_item(params, "type", plist_new_string("npi-text"));
+  plist_dict_set_item(params, "mergePolicy", plist_new_string("replace"));
+  plist_dict_set_item(params, "params", s->info ? plist_copy(s->info) : plist_new_dict());
+  return event_command("updateMRNowPlayingInfo", params);
+}
+plist_t mrp_event_capabilities(const mrp_snapshot *s) {
+  plist_t params = plist_new_dict(), array = plist_new_array();
+  // Advertise only controls that this bridge can actually forward.
+  for (unsigned i = 0; i < 13; i++) {
+    unsigned command = i < 12 ? i + 1 : 45;
+    if (!mrp_command_enabled(s, command)) continue;
+    plist_t info = plist_new_dict();
+    plist_dict_set_item(info, "kCommandInfoCommandKey", plist_new_uint(mrp_command_number(command)));
+    plist_dict_set_item(info, "kCommandInfoEnabledKey", plist_new_bool(1));
+    char *bytes = NULL; uint32_t length = 0;
+    plist_to_bin(info, &bytes, &length); plist_free(info);
+    if (bytes) plist_array_append_item(array, plist_new_data(bytes, length));
+    free(bytes);
+  }
+  plist_dict_set_item(params, "mrSupportedCommandsFromSender", array);
+  return event_command("updateMRSupportedCommands", params);
+}
+plist_t mrp_event_playback(const mrp_snapshot *s) {
+  plist_t params = plist_new_dict();
+  plist_dict_set_item(params, "mrPlaybackState", plist_new_uint(s->playback_state));
+  return event_command("updateMRPlaybackState", params);
 }
 
 static char *text(plist_t info, const char *key) {

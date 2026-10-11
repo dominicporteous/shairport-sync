@@ -2066,9 +2066,16 @@ void handle_command(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
       plist_t command = NULL;
       plist_from_memory(req->content, req->contentlength, &command);
       if (command) {
-        ap2_mrp_observe(conn, command);
+        int handled = ap2_mrp_handle_event_command(conn, command, resp);
+        if (!handled) ap2_mrp_observe(conn, command);
         plist_free(command);
+        if (handled) return;
       }
+    }
+    // A controller's state messages must not replace the audio source's metadata.
+    if (conn->airplay_stream_category == remote_control_stream) {
+      resp->respcode = 200;
+      return;
     }
 #endif
 #ifdef CONFIG_METADATA

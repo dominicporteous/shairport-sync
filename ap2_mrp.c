@@ -6,7 +6,6 @@
 #include "utilities/network_utilities.h"
 #include "rtsp.h"
 #include "mrp/state.h"
-#include "utilities/network_utilities.h"
 #include "utilities/generate_random_uuid.h"
 #include <errno.h>
 #include <math.h>
@@ -58,8 +57,10 @@ static int send_state(mrp_channel *channel, int force) {
 
 void ap2_mrp_observe(rtsp_conn_info *conn, plist_t command) {
   pthread_rwlock_rdlock(&principal_conn_lock);
-  if (conn == principal_conn && conn->airplay_type == ap_2)
+  if (conn == principal_conn && conn->airplay_type == ap_2) {
     mrp_observe(conn->connection_number, command);
+    debug(2, "Connection %d: MRP source state observed.", conn->connection_number);
+  }
   pthread_rwlock_unlock(&principal_conn_lock);
 }
 
@@ -111,14 +112,76 @@ static int forward_command(Mrp__SendCommand *request) {
   return error;
 }
 
+int ap2_mrp_send_event_state(rtsp_conn_info *conn, uint64_t *revision, int force) {
+  if (conn->airplay_stream_category != remote_control_stream ||
+      !conn->ap2_pairing_context.control_cipher_bundle.is_encrypted) return 0;
+  mrp_snapshot snapshot; mrp_get_snapshot(&snapshot);
+  int result = 0;
+  if (force || snapshot.revision != *revision) {
+    plist_t messages[] = {mrp_event_capabilities(&snapshot), mrp_event_info(&snapshot),
+                          mrp_event_playback(&snapshot)};
+    for (unsigned i = 0; i < 3; i++) {
+      if (!result && ap2_event_port_post_command(conn, messages[i]) <= 0) result = -1;
+      plist_free(messages[i]);
+    }
+    if (!result) *revision = snapshot.revision;
+    debug(2, "Connection %d: MRP event snapshot revision %" PRIu64 " sent, result %d.",
+          conn->connection_number, snapshot.revision, result);
+  }
+  mrp_free_snapshot(&snapshot);
+  return result;
+}
+
+int ap2_mrp_handle_event_command(rtsp_conn_info *conn, plist_t command, rtsp_message *response) {
+  if (conn->airplay_stream_category != remote_control_stream) return 0;
+  if (plist_get_node_type(command) != PLIST_DICT) { response->respcode = 451; return 1; }
+  char *type = NULL;
+  plist_t type_node = plist_dict_get_item(command, "type");
+  if (plist_get_node_type(type_node) == PLIST_STRING) plist_get_string_val(type_node, &type);
+  int control = type && strcmp(type, "sendMediaRemoteCommand") == 0;
+  free(type);
+  if (!control) return 0;
+  if (!conn->ap2_pairing_context.control_cipher_bundle.is_encrypted || !conn->pair_setup_result ||
+      !conn->pair_setup_result->shared_secret_len) { response->respcode = 470; return 1; }
+  char *number = NULL;
+  plist_t number_node = plist_dict_get_item(command, "modernMediaRemoteCommand");
+  if (plist_get_node_type(number_node) == PLIST_STRING) plist_get_string_val(number_node, &number);
+  if (!number || !*number || strspn(number, "0123456789") != strlen(number) || strlen(number) > 2) {
+    free(number); response->respcode = 451; return 1;
+  }
+  unsigned modern = strtoul(number, NULL, 10); free(number);
+  if (modern > 11 && modern != 24) { response->respcode = 501; return 1; }
+  Mrp__SendCommand request = MRP__SEND_COMMAND__INIT;
+  request.has_command = 1; request.command = modern == 24 ? 45 : modern + 1;
+  Mrp__Options options = MRP__OPTIONS__INIT;
+  if (modern == 24) {
+    plist_t params = plist_dict_get_item(command, "params");
+    plist_t position = plist_get_node_type(params) == PLIST_DICT ?
+                       plist_dict_get_item(params, "kMRMediaRemoteOptionPlaybackPosition") : NULL;
+    if (plist_get_node_type(position) == PLIST_REAL) {
+      options.has_position = 1; plist_get_real_val(position, &options.position);
+    } else if (plist_get_node_type(position) == PLIST_UINT) {
+      uint64_t n = 0; plist_get_uint_val(position, &n); options.has_position = 1; options.position = n;
+    }
+    request.options = &options;
+  }
+  int error = forward_command(&request);
+  response->respcode = !error ? 200 : error == 7 ? 451 : error == 10 ? 501 : 503;
+  debug(2, "Connection %d: MRP event control %u returned RTSP %d.",
+        conn->connection_number, modern, response->respcode);
+  return 1;
+}
+
 static int handle_message(mrp_channel *channel, Mrp__Protocol *request) {
   if (!request->has_type) return -1;
+  debug(2, "Connection %d: MRP data message type %u.", channel->conn->connection_number, request->type);
   Mrp__Protocol reply = MRP__PROTOCOL__INIT;
   reply.has_type = 1; reply.type = request->type; reply.identifier = request->identifier;
   Mrp__DeviceInfo device = MRP__DEVICE_INFO__INIT;
   Mrp__CommandResult result = MRP__COMMAND_RESULT__INIT;
   switch (request->type) {
   case 15: // DEVICE_INFO
+    {
     device.name = config.service_name;
     device.unique_identifier = config.airplay_pi;
     device.device_uid = config.airplay_pi;
@@ -128,8 +191,12 @@ static int handle_message(mrp_channel *channel, Mrp__Protocol *request) {
     device.has_last_supported_message_type = 1; device.last_supported_message_type = 120;
     device.has_connected = 1; device.connected = 1;
     device.has_device_class = 1; device.device_class = 7; // Accessory
+    mrp_snapshot snapshot; mrp_get_snapshot(&snapshot);
+    device.has_is_airplay_active = 1; device.is_airplay_active = snapshot.source != 0;
+    mrp_free_snapshot(&snapshot);
     reply.device_info = &device;
     return send_message(channel, &reply);
+    }
   case 16: // CLIENT_UPDATES_CONFIG
     channel->subscribed = request->updates && request->updates->has_now_playing &&
                           request->updates->now_playing;
@@ -226,6 +293,7 @@ void *ap2_mrp_receiver(void *arg) {
   SOCKADDR address; socklen_t length = sizeof(address);
   channel.fd = eintr_checked_accept(conn->data_socket, (struct sockaddr *)&address, &length);
   if (channel.fd >= 0) {
+    debug(2, "Connection %d: MRP data channel accepted.", conn->connection_number);
     struct timeval timeout = {.tv_sec = 2};
     setsockopt(channel.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(channel.fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
@@ -259,7 +327,11 @@ void *ap2_mrp_receiver(void *arg) {
       }
       if (!rc && channel.subscribed) rc = send_state(&channel, 0);
       pthread_setcancelstate(old_state, NULL);
-      if (rc) break;
+      if (rc) {
+        debug(1, "Connection %d: MRP data channel closed after processing error %d (errno %d).",
+              conn->connection_number, rc, errno);
+        break;
+      }
     }
   }
   pthread_cleanup_pop(1);

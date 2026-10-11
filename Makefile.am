@@ -384,4 +384,5 @@ check-local:
 	$(SHELL) $(top_srcdir)/tests/mrp_channel_test.sh $(abs_builddir)
 endif
 
-EXTRA_DIST = mrp/messages.proto mrp/README.md tests/mrp_test.c tests/mrp_test.sh tests/mrp_channel_test.c tests/mrp_channel_test.sh
+EXTRA_DIST = mrp/messages.proto mrp/README.md tests/mrp_test.c tests/mrp_test.sh tests/mrp_channel_test.c tests/mrp_channel_test.sh \
+  tests/fixtures/mrp-ios-supported-commands.xml

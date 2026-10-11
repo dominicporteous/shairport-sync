@@ -88,6 +88,31 @@ int main(void) {
   mrp_get_snapshot(&snapshot); assert(!mrp_command_enabled(&snapshot, 1)); mrp_free_snapshot(&snapshot);
   observe_info(8, "update", "kMRMediaRemoteNowPlayingInfoTitle", plist_new_string("New source"));
   mrp_clear(7); mrp_get_snapshot(&snapshot); assert(snapshot.source == 8); mrp_free_snapshot(&snapshot);
+  // Sanitised iOS capture: zero-based commands, boolean enabled flags and data plists.
+  FILE *fixture_file = fopen("tests/fixtures/mrp-ios-supported-commands.xml","rb"); assert(fixture_file);
+  assert(!fseek(fixture_file,0,SEEK_END)); long fixture_size = ftell(fixture_file); assert(fixture_size > 0);
+  rewind(fixture_file); char *fixture_xml = malloc(fixture_size); assert(fixture_xml);
+  assert(fread(fixture_xml,1,fixture_size,fixture_file) == (size_t)fixture_size); fclose(fixture_file);
+  plist_t captured = NULL; plist_from_xml(fixture_xml,fixture_size,&captured); free(fixture_xml); assert(captured);
+  mrp_observe(8,captured);plist_free(captured);
+  observe_info(8,"update","kMRMediaRemoteNowPlayingInfoPlaybackRate",plist_new_real(1.0));
+  mrp_get_snapshot(&snapshot); assert(snapshot.playback_state == 1);
+  assert(mrp_command_enabled(&snapshot,1) && mrp_command_enabled(&snapshot,45));
+  plist_t event_info = mrp_event_info(&snapshot), event_caps = mrp_event_capabilities(&snapshot);
+  plist_t event_state = mrp_event_playback(&snapshot);
+  assert(plist_get_node_type(plist_dict_get_item(plist_dict_get_item(event_info,"params"),"params")) == PLIST_DICT);
+  assert(plist_array_get_size(plist_dict_get_item(plist_dict_get_item(event_caps,"params"),
+                                               "mrSupportedCommandsFromSender")) == 13);
+  uint64_t state_number = 0;
+  plist_get_uint_val(plist_dict_get_item(plist_dict_get_item(event_state,"params"),"mrPlaybackState"),&state_number);
+  assert(state_number == 1);
+  plist_free(event_info);plist_free(event_caps);plist_free(event_state);mrp_free_snapshot(&snapshot);
+  observe_info(8,"update","kMRMediaRemoteNowPlayingInfoPlaybackRate",plist_new_real(0.0));
+  mrp_get_snapshot(&snapshot); assert(snapshot.playback_state == 2);mrp_free_snapshot(&snapshot);
+  observe_info(8,"update","kMRMediaRemoteNowPlayingInfoArtist",plist_new_string("Paused artist"));
+  mrp_get_snapshot(&snapshot); assert(snapshot.playback_state == 2);mrp_free_snapshot(&snapshot);
+  observe_info(8,"replace","kMRMediaRemoteNowPlayingInfoTitle",plist_new_string("New track"));
+  mrp_get_snapshot(&snapshot); assert(snapshot.playback_state == 0);mrp_free_snapshot(&snapshot);
   mrp_clear(8); mrp_get_snapshot(&snapshot);
   message = mrp_state_message(&snapshot, 1);
   assert(!message->state->queue->n_items && !message->state->supported_commands->n_commands);

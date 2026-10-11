@@ -19,6 +19,10 @@ void mrp_get_snapshot(mrp_snapshot *snapshot);
 void mrp_free_snapshot(mrp_snapshot *snapshot);
 int mrp_command_number(uint32_t command);
 int mrp_command_enabled(const mrp_snapshot *snapshot, uint32_t command);
+// AirPlay /command plists for an event-only controller; caller owns each plist.
+plist_t mrp_event_info(const mrp_snapshot *snapshot);
+plist_t mrp_event_capabilities(const mrp_snapshot *snapshot);
+plist_t mrp_event_playback(const mrp_snapshot *snapshot);
 // A standalone, owned protobuf message, freed with mrp__protocol__free_unpacked.
 Mrp__Protocol *mrp_state_message(const mrp_snapshot *snapshot, int artwork);
 Mrp__Protocol *mrp_player_message(uint32_t type);

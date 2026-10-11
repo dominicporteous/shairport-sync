@@ -6,6 +6,7 @@
 #include "rtsp.h"
 #include "utilities/rtsp_message_utilities.h"
 extern void handle_setup_2(rtsp_conn_info *, rtsp_message *, rtsp_message *);
+extern void handle_command(rtsp_conn_info *, rtsp_message *, rtsp_message *);
 #include "mrp/state.h"
 #include <assert.h>
 #include <gcrypt.h>
@@ -56,6 +57,7 @@ static void *source_event(void *arg) {
   pair_cipher_bundle cipher = {0};
   cipher.cipher_ctx = pair_cipher_new(PAIR_CLIENT_HOMEKIT_NORMAL,1,secret,sizeof(secret),"");
   assert(cipher.cipher_ctx);
+  for (unsigned request_index = 0; request_index < 2; request_index++) {
   uint8_t packet[4096]; size_t used = 0; char *end = NULL;
   do {
     ssize_t n = read_encrypted(fd,&cipher,packet+used,sizeof(packet)-used-1);
@@ -80,8 +82,55 @@ static void *source_event(void *arg) {
   plist_free(command);
   const char *response = "RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
   assert(write_encrypted(fd,&cipher,response,strlen(response)) == (ssize_t)strlen(response));
+  }
   pair_cipher_free(cipher.cipher_ctx);
   free(cipher.plaintext_read_buffer.data); free(cipher.encrypted_read_buffer.data);
+  return NULL;
+}
+
+static void *event_controller(void *arg) {
+  int fd = *(int *)arg;
+  pair_cipher_bundle cipher = {0};
+  cipher.cipher_ctx = pair_cipher_new(PAIR_CLIENT_HOMEKIT_NORMAL,1,secret,sizeof(secret),"");
+  assert(cipher.cipher_ctx);
+  for (unsigned message_index = 0; message_index < 3; message_index++) {
+    uint8_t packet[4096]; size_t used = 0; char *end = NULL;
+    do {
+      ssize_t n = read_encrypted(fd,&cipher,packet+used,sizeof(packet)-used-1);
+      assert(n > 0);used += n;packet[used]=0;end=strstr((char *)packet,"\r\n\r\n");
+    } while (!end);
+    assert(!memcmp(packet,"POST /command RTSP/1.0",21));
+    unsigned length = 0;
+    assert(sscanf(strstr((char *)packet,"Content-Length:"),"Content-Length: %u",&length) == 1);
+    size_t offset = end+4-(char *)packet;assert(offset+length < sizeof(packet));
+    while (used < offset+length) {
+      ssize_t n=read_encrypted(fd,&cipher,packet+used,sizeof(packet)-used);
+      assert(n>0);used+=n;
+    }
+    plist_t command = NULL;plist_from_bin((char *)packet+offset,length,&command);assert(command);
+    plist_t params=plist_dict_get_item(command,"params");
+    if (message_index == 0) {
+      plist_t list=plist_dict_get_item(params,"mrSupportedCommandsFromSender");
+      assert(plist_array_get_size(list)==1);
+      char *data=NULL;uint64_t size=0;
+      plist_get_data_val(plist_array_get_item(list,0),&data,&size);
+      plist_t cap=NULL;plist_from_bin(data,size,&cap);free(data);assert(cap);
+      uint64_t number=0;plist_get_uint_val(plist_dict_get_item(cap,"kCommandInfoCommandKey"),&number);
+      assert(number==24);plist_free(cap);
+    } else if (message_index == 1) {
+      char *artist=NULL;
+      plist_get_string_val(plist_dict_get_item(plist_dict_get_item(params,"params"),
+                           "kMRMediaRemoteNowPlayingInfoArtist"),&artist);
+      assert(artist && !strcmp(artist,"Live artist"));free(artist);
+    } else {
+      uint64_t state=0;plist_get_uint_val(plist_dict_get_item(params,"mrPlaybackState"),&state);
+      assert(state==1);
+    }
+    plist_free(command);
+    const char *response="RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+    assert(write_encrypted(fd,&cipher,response,strlen(response))==(ssize_t)strlen(response));
+  }
+  pair_cipher_free(cipher.cipher_ctx);free(cipher.plaintext_read_buffer.data);free(cipher.encrypted_read_buffer.data);
   return NULL;
 }
 static void enable_seek(rtsp_conn_info *source) {
@@ -102,6 +151,7 @@ int main(void) {
   config.airplay_pi = "11111111-2222-3333-4444-555555555555";
   rtsp_conn_info *controller = calloc(1,sizeof(*controller)); assert(controller);
   controller->airplay_stream_category = remote_control_stream;
+  controller->airplay_type = ap_2;
   controller->connection_ip_family = AF_INET;
   strcpy(controller->self_ip_string,"127.0.0.1");
   plist_t setup = plist_new_dict(), streams = plist_new_array(), stream = plist_new_dict();
@@ -170,6 +220,7 @@ int main(void) {
   plist_dict_set_item(info_params,"mergePolicy",plist_new_string("replace"));
   plist_dict_set_item(info,"kMRMediaRemoteNowPlayingInfoTitle",plist_new_string("Live track"));
   plist_dict_set_item(info,"kMRMediaRemoteNowPlayingInfoArtist",plist_new_string("Live artist"));
+  plist_dict_set_item(info,"kMRMediaRemoteNowPlayingInfoPlaybackRate",plist_new_real(1.0));
   plist_dict_set_item(info,"kMRMediaRemoteNowPlayingInfoArtworkData",plist_new_data("image",5));
   plist_dict_set_item(info_params,"params",info);
   plist_dict_set_item(info_command,"params",info_params);
@@ -180,7 +231,26 @@ int main(void) {
   mrp__protocol__free_unpacked(reply,NULL);
   enable_seek(source);
   reply = receive_message(); assert(reply->type == 4 && reply->state->supported_commands->n_commands == 1);
+  assert(reply->state->playback_state == 1);
   mrp__protocol__free_unpacked(reply,NULL);
+  // Event-only controller: no type-130 setup, plaintext protected by actual HAP encryption.
+  int event_client_sockets[2];assert(!socketpair(AF_UNIX,SOCK_STREAM,0,event_client_sockets));
+  controller->event_channel_fd=event_client_sockets[0];
+  controller->ap2_pairing_context.event_cipher_bundle.cipher_ctx=
+    pair_cipher_new(PAIR_SERVER_HOMEKIT,4,secret,sizeof(secret),"");
+  assert(controller->ap2_pairing_context.event_cipher_bundle.cipher_ctx);
+  pthread_mutex_init(&controller->event_sender_mutex,NULL);
+  pthread_t event_client;assert(!pthread_create(&event_client,NULL,event_controller,&event_client_sockets[1]));
+  uint64_t event_revision=0;
+  assert(!ap2_mrp_send_event_state(controller,&event_revision,1));
+  assert(!ap2_mrp_send_event_state(controller,&event_revision,0));
+  pthread_join(event_client,NULL);
+  close(event_client_sockets[0]);close(event_client_sockets[1]);
+  controller->event_channel_fd=0;
+  pair_cipher_free(controller->ap2_pairing_context.event_cipher_bundle.cipher_ctx);
+  free(controller->ap2_pairing_context.event_cipher_bundle.plaintext_read_buffer.data);
+  free(controller->ap2_pairing_context.event_cipher_bundle.encrypted_read_buffer.data);
+  pthread_mutex_destroy(&controller->event_sender_mutex);
   int events[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,events));
   source->event_channel_fd = events[0];
   source->ap2_pairing_context.event_cipher_bundle.cipher_ctx =
@@ -194,7 +264,21 @@ int main(void) {
   request.type = 1; request.send_command = &send; request.identifier = "seek";
   send_request(&request); reply = receive_message();
   assert(reply->type == 2 && reply->command_result->error == 0 && !strcmp(reply->identifier,"seek"));
-  mrp__protocol__free_unpacked(reply,NULL); pthread_join(event_thread,NULL);
+  mrp__protocol__free_unpacked(reply,NULL);
+  // Exercise the actual RTSP /command handler for event-channel control.
+  plist_t event_command=plist_new_dict(), event_params=plist_new_dict();
+  plist_dict_set_item(event_command,"type",plist_new_string("sendMediaRemoteCommand"));
+  plist_dict_set_item(event_command,"modernMediaRemoteCommand",plist_new_string("24"));
+  plist_dict_set_item(event_params,"kMRMediaRemoteOptionPlaybackPosition",plist_new_real(30.5));
+  plist_dict_set_item(event_command,"params",event_params);
+  rtsp_message *event_request=msg_init(), *event_response=msg_init();
+  msg_add_header(event_request,"Content-Type","application/x-apple-binary-plist");
+  plist_to_bin(event_command,&event_request->content,&event_request->contentlength);plist_free(event_command);
+  controller->ap2_pairing_context.control_cipher_bundle.is_encrypted=0;
+  handle_command(controller,event_request,event_response);assert(event_response->respcode==470);
+  controller->ap2_pairing_context.control_cipher_bundle.is_encrypted=1;
+  handle_command(controller,event_request,event_response);assert(event_response->respcode==200);
+  msg_free(&event_request);msg_free(&event_response);pthread_join(event_thread,NULL);
   options.position = -1; send_request(&request); reply = receive_message();
   assert(reply->command_result->error == 7); mrp__protocol__free_unpacked(reply,NULL);
   send.command = 1; send_request(&request); reply = receive_message();
@@ -212,6 +296,6 @@ int main(void) {
   free(source->ap2_pairing_context.event_cipher_bundle.encrypted_read_buffer.data);
   pthread_mutex_destroy(&source->event_sender_mutex);principal_conn=NULL;free(source);free(controller->pair_setup_result);
   free(controller->ap2_pairing_context.data_cipher_bundle.description);free(controller);
-  puts("Encrypted MRP channel tests passed: fragmented records, handshake, subscription, live state, source seek, command errors and disconnect.");
+  puts("Encrypted MRP channel tests passed: data and event transports, authenticated RTSP controls, rate-derived playback state, live metadata, source seek, command errors and disconnect.");
   return 0;
 }

@@ -26,6 +26,9 @@
 
 #include "ap2_event_receiver.h"
 #include "common.h"
+#ifdef CONFIG_MRP_INTERFACE
+#include "ap2_mrp.h"
+#endif
 #include "player.h"
 #include "utilities/network_utilities.h"
 #include "utilities/rtsp_message_utilities.h"
@@ -160,7 +163,10 @@ void ap2_event_receiver_cleanup_handler(void *arg) {
   // debug(1, "Connection %d: AP2 Event Receiver Cleanup start.", conn->connection_number);
 #ifdef CONFIG_METADATA
   // this is here to ensure it's only performed once during a teardown of a ptp stream
-  send_ssnc_metadata('disc', conn->client_ip_string, strlen(conn->client_ip_string), 1);
+#ifdef CONFIG_MRP_INTERFACE
+  if (conn->airplay_stream_category != remote_control_stream)
+#endif
+    send_ssnc_metadata('disc', conn->client_ip_string, strlen(conn->client_ip_string), 1);
 #endif
   pthread_mutex_lock(&conn->event_sender_mutex);
   pthread_cleanup_push(mutex_unlock, &conn->event_sender_mutex);
@@ -206,7 +212,30 @@ void *ap2_event_receiver(void *arg) {
 
     ap2_event_send_update_info(conn);
 
+#ifdef CONFIG_MRP_INTERFACE
+    uint64_t mrp_revision = 0;
+    int mrp_first_snapshot = 1;
+    int mrp_relay_enabled = 1;
+#endif
     while (1) {
+#ifdef CONFIG_MRP_INTERFACE
+      // Apple Home controllers can use only the event channel, without type 130.
+      // This thread owns the channel. Source metadata processing never waits for a
+      // controller's acknowledgement or runs network I/O under the cache lock.
+      int old_cancel_state;
+      pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+      int result = mrp_relay_enabled ?
+          ap2_mrp_send_event_state(conn, &mrp_revision, mrp_first_snapshot) : 0;
+      mrp_first_snapshot = 0;
+      pthread_setcancelstate(old_cancel_state, NULL);
+      if (result != 0) {
+        // An event-only client can reject a message it does not implement.
+        // Preserve its existing connection and any separate data-channel session.
+        mrp_relay_enabled = 0;
+        debug(1, "Connection %d: MRP event state relay stopped after a failed acknowledgement.",
+              conn->connection_number);
+      }
+#endif
       usleep(100000);
     };
 

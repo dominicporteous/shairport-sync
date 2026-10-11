@@ -13,12 +13,25 @@ protoc-c --c_out=. mrp/messages.proto
 The wire field definitions and data stream envelope are documented by
 [pyatv](https://github.com/postlund/pyatv/tree/master/pyatv/protocols/mrp).
 The endpoint uses the existing HomeKit pair verification and encrypted data
-channel; it does not open an unauthenticated MRP service.
+channel; it does not open an unauthenticated MRP service. The version string
+includes `-mrp` when this support is compiled in.
+
+Some Apple Home hubs establish only the encrypted AirPlay event channel and never
+request a type-130 stream. For those remote-control sessions, the receiver now
+relays source metadata, supported commands and playback state as `/command`
+plists on their event channel. Controller `sendMediaRemoteCommand` requests on the
+RTSP connection are authenticated and forwarded to the active audio source. The
+event relay preserves the source's now-playing plist fields and uses the same
+command formats observed in iOS source captures. Acceptance and display by a real
+Apple Home hub remain device-validation requirements; a simulated acknowledgement
+does not prove that Home consumes or displays these messages.
 
 A controller can request device information, subscribe to now-playing updates,
 and request the current playback queue item. Source `updateMRNowPlayingInfo`,
 `updateMRSupportedCommands`, and `updateMRPlaybackState` messages are reflected
-in MRP state updates. Late subscribers receive the current state. Metadata
+in MRP state updates. iOS sources that report play/pause only through
+`kMRMediaRemoteNowPlayingInfoPlaybackRate` also update the playing/paused state.
+Late subscribers receive the current state. Metadata
 replacement clears the previous track; source disconnection clears its state.
 Artwork is delivered when requested by the controller. Elapsed time timestamps
 use Apple's reference epoch and remain attached to the source's elapsed value.
@@ -42,8 +55,18 @@ Run the standalone protocol regression tests from the checkout:
 ```
 
 The channel test links the configured AirPlay 2 + MRP build and exercises the
-production receiver using real HAP encryption, including a simulated source
-acknowledging a seek command. It does not simulate HomeKit pair verification.
+production receiver using real HAP encryption, including data-channel and
+event-only metadata delivery and a simulated source acknowledging a seek command
+through each control path. It does not simulate HomeKit pair verification.
+
+`tests/fixtures/mrp-ios-supported-commands.xml` is a sanitised iOS capability
+capture. It retains command numbers and enabled-flag types, with device identity
+and optional source-specific parameters removed.
+
+At log verbosity 2, look for `MRP source state observed`, `MRP event snapshot`,
+`MRP event control`, and (when type 130 is used) `MRP data channel accepted` and
+`MRP data message type`. These messages identify the transport and command result
+without printing pairing secrets or metadata contents.
 
 Device validation requires NQPTP, an AirPlay source, and a paired Apple controller.
 Add the receiver in Apple Home, begin playback, then check title/artist/artwork,
